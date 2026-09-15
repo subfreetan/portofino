@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portofino Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  * { box-sizing: border-box; font-family: 'Figtree', sans-serif; }
+  body { background: #f3f2ef; margin: 0; min-height: 100vh; color: #1a1712; }
+  h1, h2, h3 { font-family: 'Caprasimo', serif; font-weight: 400; margin: 0; }
+
+  .status-badge { padding: 4px 10px; border-radius: 50px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .status-pending    { background: #FEF3C7; color: #92400E; }
+  .status-confirmed  { background: #DBEAFE; color: #1E40AF; }
+  .status-preparing  { background: #FDE68A; color: #92400E; }
+  .status-ready      { background: #D1FAE5; color: #065F46; }
+  .status-collected  { background: #E5E7EB; color: #6B7280; }
+
+  .order-card { background: white; border-radius: 16px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+
+  .action-btn { padding: 9px 16px; border-radius: 50px; font-size: 12.5px; font-weight: 700; border: none; cursor: pointer; transition: transform .15s; }
+  .action-btn:hover { transform: scale(1.03); }
+  .action-btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+  .tab-btn { padding: 9px 14px; border-radius: 50px; font-size: 12.5px; font-weight: 600; border: none; cursor: pointer; }
+  .tab-active { background: #100e0c; color: #f5ead8; }
+  .tab-inactive { background: transparent; color: #8a8477; }
+
+  #reader { width: 100%; max-width: 380px; margin: 0 auto; }
+  #reader video { border-radius: 12px; }
+
+  .client-card { background: white; border-radius: 16px; padding: 20px; margin-top: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .stat-card { background: white; border-radius: 14px; padding: 14px; text-align: center; }
+
+  .form-input { width: 100%; padding: 11px 13px; border: 1.5px solid #e5e2da; border-radius: 12px; font-size: 14px; outline: none; }
+  .form-input:focus { border-color: #d8b06a; }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(16,14,12,.55); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .modal-content { background: white; border-radius: 20px; width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; }
+
+  .menu-item { display:flex; justify-content:space-between; align-items:center; padding:11px 14px; border-radius:12px; background:#faf9f6; margin-bottom:8px; cursor:pointer; }
+  .menu-item:hover { background:#f1ede4; }
+</style>
+</head>
+<body>
+  <div id="app" style="max-width: 760px; margin: 0 auto; padding: 18px;"></div>
+
+  <script>
+    /* ══════════════════════════════════════════════════════════════
+       CONFIG & ÉTAT
+       ══════════════════════════════════════════════════════════════ */
+    const API_URL = 'https://portofino-production.up.railway.app';
+    let authToken = localStorage.getItem('portofino_admin_token') || null;
+
+    let currentTab = 'orders';       // 'orders' | 'scanner'
+    let filterStatus = '';
+    let orders = [];
+    let scanResult = null;           // { type: 'user', user } | { type: 'order', order }
+    let scanMessage = null;          // message d'erreur du scan
+    let scannerInstance = null;
+
+    let showInstoreModal = false;
+    let instoreCat = 'Pizzas';
+    let instoreCart = [];
+
+    const STATUS_LABELS = { pending: 'En attente', confirmed: 'Confirmée', preparing: 'En préparation', ready: 'Prête', collected: 'Récupérée' };
+
+    // Catalogue simplifié (prix de base, sans options de taille/pâte) pour la prise de commande au comptoir
+    const CATS = ['Pizzas', 'Pizzas blanches', 'Plats', 'Pâtes', 'Pâtes gratinées', 'Entrées chaudes', 'Desserts', 'Boissons'];
+    const MENU = [
+      { id: 'margherita', cat: 'Pizzas', name: 'Margherita', price: 9.5 },
+      { id: 'regina', cat: 'Pizzas', name: 'Regina', price: 12.5 },
+      { id: 'portofino', cat: 'Pizzas', name: 'Portofino', price: 14 },
+      { id: 'diavola', cat: 'Pizzas', name: 'Diavola', price: 13 },
+      { id: 'formaggi', cat: 'Pizzas', name: 'Quattro Formaggi', price: 13.5 },
+      { id: 'ortolana', cat: 'Pizzas', name: 'Ortolana', price: 12 },
+      { id: 'bianca', cat: 'Pizzas blanches', name: 'Bianca', price: 10 },
+      { id: 'quattro-b', cat: 'Pizzas blanches', name: 'Quattro Formaggi bianca', price: 14 },
+      { id: 'savoyarde', cat: 'Pizzas blanches', name: 'Savoyarde', price: 14.5 },
+      { id: 'escalope', cat: 'Plats', name: 'Escalope milanaise', price: 15 },
+      { id: 'osso', cat: 'Plats', name: 'Osso buco', price: 17 },
+      { id: 'bolognaise', cat: 'Pâtes', name: 'Tagliatelles bolognaise', price: 12 },
+      { id: 'carbonara', cat: 'Pâtes', name: 'Carbonara', price: 13 },
+      { id: 'pesto', cat: 'Pâtes', name: 'Pesto genovese', price: 12 },
+      { id: 'grat-4f', cat: 'Pâtes gratinées', name: 'Gratin quatre fromages', price: 14 },
+      { id: 'grat-saumon', cat: 'Pâtes gratinées', name: 'Gratin saumon épinards', price: 15 },
+      { id: 'focaccia', cat: 'Entrées chaudes', name: 'Focaccia romarin', price: 4.5 },
+      { id: 'arancini', cat: 'Entrées chaudes', name: 'Arancini (3)', price: 6 },
+      { id: 'bruschetta', cat: 'Entrées chaudes', name: 'Bruschetta', price: 5.5 },
+      { id: 'tiramisu', cat: 'Desserts', name: 'Tiramisu maison', price: 5.5 },
+      { id: 'pannacotta', cat: 'Desserts', name: 'Panna cotta', price: 5 },
+      { id: 'limonata', cat: 'Boissons', name: 'Limonata sicilienne', price: 3.5 },
+      { id: 'eau', cat: 'Boissons', name: 'Eau minérale', price: 2.5 },
+      { id: 'soda', cat: 'Boissons', name: 'Sodas', price: 3 },
+      { id: 'biere', cat: 'Boissons', name: 'Bière italienne', price: 5 },
+      { id: 'chianti', cat: 'Boissons', name: 'Chianti', price: 6 },
+      { id: 'cafe', cat: 'Boissons', name: 'Café ristretto', price: 2 },
+    ];
+
+    function fmt(n) { return n.toFixed(2) + ' €'; }
+    const $ = (id) => document.getElementById(id);
+
+    /* ══════════════════════════════════════════════════════════════
+       API
+       ══════════════════════════════════════════════════════════════ */
+    async function apiFetch(path, options = {}) {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+      if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+      const res = await fetch(API_URL + path, Object.assign({}, options, { headers }));
+      let data = {};
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(data.error || ('Erreur serveur (' + res.status + ')'));
+      return data;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       AUTH
+       ══════════════════════════════════════════════════════════════ */
+    function renderLogin() {
+      $('app').innerHTML = `
+        <div style="max-width:360px;margin:70px auto;padding:28px;background:white;border-radius:20px;box-shadow:0 2px 10px rgba(0,0,0,.06)">
+          <div style="text-align:center;margin-bottom:26px">
+            <div style="width:48px;height:48px;border-radius:999px;border:1px solid #d8b06a;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;color:#d8b06a;font-family:'Caprasimo',serif;font-size:20px">P</div>
+            <h1 style="font-size:21px">Portofino Admin</h1>
+            <p style="font-size:12.5px;color:#8a8477;margin-top:4px">Espace réservé au staff</p>
+          </div>
+          <div id="loginError" style="display:none;background:#FEE2E2;color:#991B1B;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:14px"></div>
+          <div style="margin-bottom:11px"><input id="adminUser" type="text" placeholder="Pseudo admin" class="form-input"></div>
+          <div style="margin-bottom:18px"><input id="adminPass" type="password" placeholder="Mot de passe" class="form-input"></div>
+          <button id="adminLoginBtn" class="action-btn" style="width:100%;background:#100e0c;color:#f5ead8;padding:13px" onclick="adminLogin()">Connexion</button>
+        </div>`;
+    }
+
+    async function adminLogin() {
+      const username = ($('adminUser').value || '').trim();
+      const password = $('adminPass').value || '';
+      const errEl = $('loginError');
+      const btn = $('adminLoginBtn');
+      if (!username || !password) { errEl.textContent = 'Remplis tous les champs.'; errEl.style.display = 'block'; return; }
+      errEl.style.display = 'none';
+      btn.textContent = 'Connexion…'; btn.disabled = true;
+      try {
+        const data = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+        authToken = data.token;
+        localStorage.setItem('portofino_admin_token', authToken);
+        if (data.user.role !== 'admin') {
+          errEl.textContent = 'Ce compte n\'est pas administrateur.'; errEl.style.display = 'block';
+          adminLogout(); return;
+        }
+        renderDashboard();
+      } catch (err) {
+        errEl.textContent = err.message || 'Erreur de connexion.'; errEl.style.display = 'block';
+        btn.textContent = 'Connexion'; btn.disabled = false;
+      }
+    }
+
+    function adminLogout() {
+      authToken = null;
+      localStorage.removeItem('portofino_admin_token');
+      renderLogin();
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       DASHBOARD / ONGLETS
+       ══════════════════════════════════════════════════════════════ */
+    async function renderDashboard() {
+      await loadOrders();
+      renderApp();
+    }
+
+    async function loadOrders() {
+      try {
+        const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+        const { orders: list } = await apiFetch('/admin/orders?since=' + encodeURIComponent(startOfDay.toISOString()));
+        orders = list || [];
+      } catch (err) {
+        if (String(err.message).includes('401') || String(err.message).includes('403')) { adminLogout(); return; }
+        console.error('Erreur chargement commandes:', err);
+      }
+    }
+
+    function renderApp() {
+      const pendingCount = orders.filter((o) => o.status === 'pending').length;
+      const readyCount = orders.filter((o) => o.status === 'ready').length;
+      $('app').innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:22px">Portofino Admin</h1>
+            <p style="font-size:12px;color:#8a8477">Gestion du jour</p>
+          </div>
+          <button class="action-btn" style="background:#efece4;color:#6b6558" onclick="adminLogout()">Déconnexion</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+          <div class="stat-card"><p style="font-size:22px;font-weight:700">${orders.length}</p><p style="font-size:11px;color:#8a8477">Commandes du jour</p></div>
+          <div class="stat-card" style="background:#FEF3C7"><p style="font-size:22px;font-weight:700;color:#92400E">${pendingCount}</p><p style="font-size:11px;color:#92400E">En attente</p></div>
+          <div class="stat-card" style="background:#D1FAE5"><p style="font-size:22px;font-weight:700;color:#065F46">${readyCount}</p><p style="font-size:11px;color:#065F46">Prêtes</p></div>
+        </div>
+
+        <div style="display:flex;gap:6px;margin-bottom:16px;background:white;border-radius:50px;padding:4px">
+          <button class="tab-btn ${currentTab === 'orders' ? 'tab-active' : 'tab-inactive'}" style="flex:1" onclick="switchTab('orders')">Commandes</button>
+          <button class="tab-btn ${currentTab === 'scanner' ? 'tab-active' : 'tab-inactive'}" style="flex:1" onclick="switchTab('scanner')">Scanner</button>
+        </div>
+
+        <div id="tabContent"></div>
+      `;
+      if (currentTab === 'orders') renderOrdersTab(); else renderScannerTab();
+    }
+
+    function switchTab(tab) {
+      if (currentTab === 'scanner' && scannerInstance) { scannerInstance.stop().catch(() => {}); scannerInstance = null; }
+      currentTab = tab;
+      renderApp();
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       ONGLET COMMANDES
+       ══════════════════════════════════════════════════════════════ */
+    function renderOrdersTab() {
+      const filters = [
+        { status: '', label: 'Toutes' },
+        { status: 'pending', label: 'En attente' },
+        { status: 'confirmed', label: 'Confirmées' },
+        { status: 'preparing', label: 'En prépa' },
+        { status: 'ready', label: 'Prêtes' },
+        { status: 'collected', label: 'Récupérées' },
+      ];
+      const filtersHtml = filters.map((f) => {
+        const count = f.status ? orders.filter((o) => o.status === f.status).length : orders.length;
+        return `<button class="tab-btn ${filterStatus === f.status ? 'tab-active' : 'tab-inactive'}" style="white-space:nowrap" onclick="setFilter('${f.status}')">${f.label} (${count})</button>`;
+      }).join('');
+
+      const filtered = filterStatus ? orders.filter((o) => o.status === filterStatus) : orders;
+      const ordersHtml = filtered.length === 0
+        ? `<p style="text-align:center;color:#8a8477;padding:34px 0">Aucune commande</p>`
+        : filtered.map((o) => {
+            const user = o.users || {};
+            const items = (o.items || []).map((it) => (it.qty || 1) + '× ' + it.name).join(', ');
+            const time = new Date(o.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            const next = nextStatusLabel(o.status);
+            const isReward = o.is_reward;
+            return `
+              <div class="order-card">
+                <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:7px">
+                  <div>
+                    <p style="font-size:14px;font-weight:700">${user.first_name || '?'} @${user.username || '?'}</p>
+                    <p style="font-size:11px;color:#8a8477">${time} · code ${o.pickup_code} · ${user.card_number || ''}</p>
+                  </div>
+                  <span class="status-badge status-${o.status}">${STATUS_LABELS[o.status]}</span>
+                </div>
+                <p style="font-size:12.5px;color:#4b463c;margin-bottom:9px">${items}</p>
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <p style="font-size:15px;font-weight:700">${isReward ? 'Récompense' : fmt(Number(o.total))}</p>
+                  <div style="display:flex;gap:8px;align-items:center">
+                    <span style="font-size:11px;color:#2e7d32;font-weight:600">${o.points_earned ? '+' + o.points_earned + ' pts' : ''}</span>
+                    ${next ? `<button class="action-btn" style="background:${next.color};color:white" onclick="advanceOrder('${o.id}')">${next.label}</button>` : ''}
+                  </div>
+                </div>
+              </div>`;
+          }).join('');
+
+      $('tabContent').innerHTML = `
+        <div style="display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px">${filtersHtml}</div>
+        <button class="action-btn" style="width:100%;background:white;border:1.5px solid #e5e2da;color:#1a1712;margin-bottom:14px" onclick="loadOrders().then(renderApp)">↻ Rafraîchir</button>
+        ${ordersHtml}
+      `;
+    }
+
+    function nextStatusLabel(status) {
+      const map = {
+        pending: { next: 'confirmed', label: 'Confirmer', color: '#3B82F6' },
+        confirmed: { next: 'preparing', label: 'Préparer', color: '#8B5CF6' },
+        preparing: { next: 'ready', label: 'Prête', color: '#22C55E' },
+        ready: { next: 'collected', label: 'Récupérée', color: '#6B7280' },
+      };
+      return map[status] || null;
+    }
+
+    async function setFilter(status) { filterStatus = status; renderOrdersTab(); }
+
+    async function advanceOrder(id) {
+      try {
+        await apiFetch('/admin/orders/' + id + '/advance', { method: 'PATCH' });
+        await loadOrders();
+        renderApp();
+      } catch (err) { alert(err.message || 'Erreur lors de la mise à jour.'); }
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       ONGLET SCANNER
+       ══════════════════════════════════════════════════════════════ */
+    function renderScannerTab() {
+      const resultBlock = scanMessage
+        ? `<div style="text-align:center;padding:18px;color:#991B1B;background:#FEE2E2;border-radius:12px;margin-top:16px">${scanMessage}</div>`
+        : !scanResult ? ''
+        : scanResult.type === 'order'
+        ? `<div style="text-align:center;padding:18px;color:#065F46;background:#D1FAE5;border-radius:12px;margin-top:16px">Commande <b>${scanResult.order.pickup_code}</b> marquée comme récupérée ✓</div>`
+        : `
+          <div class="client-card">
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:16px">
+              <div>
+                <h3 style="font-size:18px">${scanResult.user.first_name} @${scanResult.user.username}</h3>
+                <p style="font-size:12px;color:#8a8477">Carte ${scanResult.user.card_number}</p>
+              </div>
+              <div style="text-align:right">
+                <p style="font-size:24px;font-weight:700;color:#d8b06a">${scanResult.user.points_balance}</p>
+                <p style="font-size:11px;color:#8a8477">points</p>
+              </div>
+            </div>
+            <button class="action-btn" style="width:100%;background:#22C55E;color:white;padding:13px;margin-bottom:10px" onclick="openInstoreModal()">+ Nouvelle commande sur place</button>
+            <div style="display:flex;gap:8px">
+              <input id="pointsDelta" type="number" placeholder="± points" class="form-input" style="flex:1">
+              <button class="action-btn" style="background:#efece4;color:#1a1712" onclick="adjustPoints()">Ajuster</button>
+            </div>
+          </div>`;
+
+      $('tabContent').innerHTML = `
+        <div style="background:white;border-radius:16px;padding:18px;text-align:center">
+          <h3 style="font-size:15px;margin-bottom:5px">Scanner le QR du client</h3>
+          <p style="font-size:12px;color:#8a8477;margin-bottom:14px">Fonctionne aussi pour valider un code de retrait de commande</p>
+          <div id="reader"></div>
+          <button id="startScanBtn" class="action-btn" style="margin-top:14px;background:#100e0c;color:#f5ead8" onclick="startScanner()">Démarrer le scanner</button>
+        </div>
+        ${resultBlock}
+        ${showInstoreModal ? renderInstoreModal() : ''}
+      `;
+    }
+
+    function startScanner() {
+      const btn = $('startScanBtn');
+      btn.textContent = 'Chargement…'; btn.disabled = true;
+      scanResult = null; scanMessage = null;
+      scannerInstance = new Html5Qrcode('reader');
+      scannerInstance.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        onScanSuccess,
+        () => {}
+      ).catch((err) => {
+        console.error('Erreur scanner:', err);
+        btn.textContent = 'Réessayer'; btn.disabled = false;
+      });
+    }
+
+    async function onScanSuccess(decodedText) {
+      if (scannerInstance) { scannerInstance.stop().catch(() => {}); scannerInstance = null; }
+      try {
+        const data = await apiFetch('/admin/scan', { method: 'POST', body: JSON.stringify({ code: decodedText }) });
+        scanResult = data; scanMessage = null;
+      } catch (err) {
+        scanResult = null; scanMessage = err.message || 'Code inconnu.';
+      }
+      renderScannerTab();
+    }
+
+    async function adjustPoints() {
+      const input = $('pointsDelta');
+      const delta = Number(input.value);
+      if (!delta) return;
+      try {
+        const { user } = await apiFetch('/admin/users/' + scanResult.user.id + '/points', { method: 'POST', body: JSON.stringify({ delta }) });
+        scanResult = { type: 'user', user };
+        renderScannerTab();
+      } catch (err) { alert(err.message || 'Erreur lors de l\'ajustement.'); }
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       COMMANDE SUR PLACE (après scan)
+       ══════════════════════════════════════════════════════════════ */
+    function openInstoreModal() { showInstoreModal = true; instoreCart = []; instoreCat = 'Pizzas'; renderScannerTab(); }
+    function closeInstoreModal() { showInstoreModal = false; instoreCart = []; renderScannerTab(); }
+    function setInstoreCat(cat) { instoreCat = cat; renderScannerTab(); }
+    function addToInstoreCart(id) {
+      const item = MENU.find((m) => m.id === id);
+      if (!item) return;
+      instoreCart.push({ name: item.name, detail: item.name, qty: 1, unitPrice: item.price });
+      renderScannerTab();
+    }
+    function removeFromInstoreCart(i) { instoreCart.splice(i, 1); renderScannerTab(); }
+
+    function renderInstoreModal() {
+      const total = instoreCart.reduce((s, it) => s + it.unitPrice * it.qty, 0);
+      const catsHtml = CATS.map((c) => `<button class="tab-btn ${instoreCat === c ? 'tab-active' : 'tab-inactive'}" style="white-space:nowrap" onclick="setInstoreCat('${c}')">${c}</button>`).join('');
+      const itemsHtml = MENU.filter((m) => m.cat === instoreCat).map((m) => `
+        <div class="menu-item" onclick="addToInstoreCart('${m.id}')">
+          <span style="font-size:13.5px">${m.name}</span>
+          <span style="font-size:13px;font-weight:700;color:#d8b06a">${fmt(m.price)}</span>
+        </div>`).join('');
+      const cartHtml = instoreCart.length === 0 ? '' : `
+        <div style="padding:12px 18px;border-top:1px solid #eee;max-height:150px;overflow-y:auto">
+          <p style="font-size:12px;font-weight:700;margin-bottom:8px">Panier</p>
+          ${instoreCart.map((it, i) => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0">
+              <span style="font-size:12.5px;color:#4b463c">${it.name}</span>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:12.5px;font-weight:600">${fmt(it.unitPrice)}</span>
+                <button onclick="removeFromInstoreCart(${i})" style="background:#FEE2E2;color:#DC2626;border:none;width:22px;height:22px;border-radius:50%;font-size:12px;cursor:pointer">×</button>
+              </div>
+            </div>`).join('')}
+        </div>`;
+      return `
+        <div class="modal-overlay" onclick="if(event.target===this) closeInstoreModal()">
+          <div class="modal-content">
+            <div style="padding:16px 18px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center">
+              <h2 style="font-size:16px">Commande pour ${scanResult.user.first_name}</h2>
+              <button onclick="closeInstoreModal()" style="border:none;background:none;font-size:20px;cursor:pointer;color:#8a8477">×</button>
+            </div>
+            <div style="padding:14px 18px 0;display:flex;gap:6px;overflow-x:auto">${catsHtml}</div>
+            <div style="padding:14px 18px">${itemsHtml}</div>
+            ${cartHtml}
+            <div style="padding:16px 18px;border-top:1px solid #eee">
+              <div style="display:flex;justify-content:space-between;margin-bottom:12px">
+                <span style="font-size:14px;font-weight:700">Total</span>
+                <span style="font-size:18px;font-weight:700">${fmt(total)}</span>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="action-btn" style="flex:1;background:#efece4;color:#1a1712;padding:12px" onclick="submitInstoreOrder('counter')" ${instoreCart.length === 0 ? 'disabled' : ''}>Réglé en espèces</button>
+                <button class="action-btn" style="flex:1;background:#100e0c;color:#f5ead8;padding:12px" onclick="submitInstoreOrder('card')" ${instoreCart.length === 0 ? 'disabled' : ''}>Réglé par carte</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    async function submitInstoreOrder(paymentMethod) {
+      if (instoreCart.length === 0) return;
+      try {
+        const data = await apiFetch('/admin/orders/instore', {
+          method: 'POST',
+          body: JSON.stringify({ userId: scanResult.user.id, items: instoreCart, paymentMethod }),
+        });
+        scanResult.user.points_balance = data.newBalance;
+        closeInstoreModal();
+        document.body.insertAdjacentHTML('beforeend', `
+          <div id="instoreSuccess" style="position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:9999;background:#22c55e;color:white;padding:13px 22px;border-radius:12px;font-size:13.5px;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,.15)">✓ Commande créée · +${data.pointsEarned} points ajoutés</div>`);
+        setTimeout(() => $('instoreSuccess') && $('instoreSuccess').remove(), 3000);
+        await loadOrders();
+        renderScannerTab();
+      } catch (err) {
+        alert(err.message || 'Erreur lors de la création de la commande.');
+      }
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       INIT
+       ══════════════════════════════════════════════════════════════ */
+    async function init() {
+      if (!authToken) { renderLogin(); return; }
+      try {
+        await apiFetch('/auth/profile'); // valide le token ; si ce n'est pas un admin, /admin/* renverra 403 ensuite
+        renderDashboard();
+      } catch (err) {
+        adminLogout();
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
